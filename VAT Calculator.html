@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flat Rate VAT Calculator (10.5%)</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Use Inter font -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f4f7f9;
+        }
+        .container-card {
+            background-color: #ffffff;
+            border-radius: 1rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            padding: 1.5rem;
+        }
+        .input-style {
+            border: 1px solid #d1d5db;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            width: 100%;
+            transition: all 0.2s;
+        }
+        .input-style:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5);
+        }
+        .btn-primary {
+            background-color: #2563eb;
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            transition: background-color 0.2s;
+            cursor: pointer;
+        }
+        .btn-primary:hover {
+            background-color: #1d4ed8;
+        }
+        .summary-box {
+            background-color: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 1rem;
+            border-radius: 0.5rem;
+        }
+        .filter-btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: 500;
+            border: 1px solid #d1d5db;
+            transition: all 0.2s;
+            min-width: 80px; /* Ensure buttons are stable */
+        }
+        .filter-btn.active {
+            background-color: #3b82f6;
+            color: white;
+            border-color: #3b82f6;
+        }
+    </style>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId = null;
+        let vatRecordsRef;
+
+        // --- IMPORTANT: GOOGLE APPS SCRIPT WEB APP URL ---
+        // This is the URL to your deployed Google Apps Script for Google Sheet integration.
+        const GOOGLE_SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzKhb2h7gqPBb0FTHbOWUZV603sceaXKqA80LJuBHWryJbSz9IU6JIYMc_jCwRHSPhR/exec"; 
+        // --------------------------------------------------
+
+        setLogLevel('debug'); // Enable Firestore logging
+
+        /**
+         * Utility function to determine the start and end dates for filtering
+         * based on a chosen filter type and a reference date.
+         */
+        const getDateRange = (filter, dateString = null) => {
+            // Use the provided date string or fall back to the current date
+            const refDate = dateString ? new Date(dateString) : new Date();
+            const now = refDate; 
+            let startDate = new Date(now);
+            let endDate = new Date(now); 
+
+            // Reset time for accurate date comparisons
+            const resetTime = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+            switch (filter) {
+                case 'daily':
+                    startDate = resetTime(now);
+                    endDate = new Date(startDate);
+                    endDate.setDate(endDate.getDate() + 1); // End of today
+                    break;
+                case 'weekly':
+                    // Calculate start of the week (Monday) relative to the reference date
+                    const day = now.getDay() || 7; // Get day number, make Sunday 7
+                    startDate.setDate(now.getDate() - day + 1); // Go back to Monday
+                    startDate = resetTime(startDate);
+                    endDate = new Date(startDate);
+                    endDate.setDate(endDate.getDate() + 7); // End of next Sunday
+                    break;
+                case 'monthly':
+                    startDate = resetTime(new Date(now.getFullYear(), now.getMonth(), 1)); // Start of the month
+                    endDate = new Date(now.getFullYear(), now.getMonth() + 1, 1); // Start of next month
+                    break;
+                case 'yearly':
+                    startDate = resetTime(new Date(now.getFullYear(), 0, 1)); // Start of the year
+                    endDate = new Date(now.getFullYear() + 1, 0, 1); // Start of next year
+                    break;
+            }
+            return { startDate, endDate };
+        };
+
+        // --- Core Application Functions ---
+
+        window.initFirebase = async () => {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase config is missing. Data persistence will not work.");
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Authenticate using the provided custom token or anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id').textContent = `User ID: ${userId}`;
+                        vatRecordsRef = collection(db, `artifacts/${appId}/users/${userId}/vat_records`);
+                        console.log("Firebase initialized and user authenticated:", userId);
+                        
+                        // Set the default filter date to today
+                        const today = new Date().toISOString().split('T')[0];
+                        const filterDateInput = document.getElementById('filterDate');
+                        if (filterDateInput) {
+                            filterDateInput.value = today;
+                        }
+                        
+                        // Set up initial listener after successful auth
+                        window.setupRealtimeListener('monthly'); 
+                    } else {
+                        console.log("User signed out or anonymous sign-in failed.");
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization or Auth Error:", error);
+            }
+        };
+
+        // Function to push data to Google Sheets via Apps Script
+        const pushToGoogleSheet = async (invoiceData) => {
+            if (!GOOGLE_SHEET_API_URL || GOOGLE_SHEET_API_URL === "YOUR_APPS_SCRIPT_WEB_APP_URL_HERE") {
+                console.warn("Google Sheet API URL is not set. Data not sent to Sheet.");
+                return;
+            }
+
+            try {
+                // Implementing a simple retry mechanism with exponential backoff
+                const maxRetries = 3;
+                for (let i = 0; i < maxRetries; i++) {
+                    const response = await fetch(GOOGLE_SHEET_API_URL, {
+                        method: 'POST',
+                        mode: 'no-cors', // Apps Script requires 'no-cors' for simplicity
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(invoiceData)
+                    });
+
+                    // In 'no-cors' mode, we can't reliably check the status. 
+                    // We assume success unless an underlying network error occurred.
+                    console.log(`Attempted to send data to Google Sheet (Try ${i + 1}).`);
+                    return; // Exit on successful request attempt (even if response status is unknown)
+                }
+            } catch (error) {
+                console.error("Error sending data to Google Sheet API after retries:", error);
+            }
+        };
+
+
+        // Called when a new invoice is submitted
+        window.saveInvoice = async (event) => {
+            event.preventDefault();
+            if (!userId || !vatRecordsRef) {
+                document.getElementById('status-message').textContent = 'Error: Database connection not ready.';
+                return;
+            }
+
+            const totalGrossInput = document.getElementById('totalGross');
+            const totalGross = parseFloat(totalGrossInput.value);
+            const invoiceNumber = document.getElementById('invoiceNumber').value.trim();
+            const dateValue = document.getElementById('invoiceDate').value;
+            
+            if (isNaN(totalGross) || totalGross <= 0 || !invoiceNumber || !dateValue) {
+                document.getElementById('status-message').textContent = 'Please fill out all fields correctly.';
+                document.getElementById('status-message').className = 'text-red-500 font-bold mt-2';
+                return;
+            }
+
+            try {
+                // VAT Calculations (UK Standard Rate 20%)
+                const standardVATRate = 0.20;
+                
+                // Original Price (Net) = Gross / 1.2
+                const netPrice = totalGross / (1 + standardVATRate); 
+                
+                // 20% VAT component of the Gross price
+                const standardVATAmount = totalGross * (standardVATRate / (1 + standardVATRate));
+                
+                // Flat Rate Scheme (FRS) Calculations (10.5% of gross turnover)
+                const flatRatePercent = 0.105; 
+                const hmrcFlatRateAmount = totalGross * flatRatePercent;
+
+                // PCW Retained Profit (VAT retained by business)
+                const pcwRetainedVat = standardVATAmount - hmrcFlatRateAmount;
+
+                // Final PCW Amount = Net Price + PCW Retained VAT
+                const finalPcwAmount = netPrice + pcwRetainedVat;
+
+                const newInvoice = {
+                    invoiceNumber: invoiceNumber,
+                    date: dateValue,
+                    totalPrice: parseFloat(totalGross.toFixed(2)), // Gross (Number)
+                    netPrice: netPrice.toFixed(2), 
+                    vat20Percent: standardVATAmount.toFixed(2),
+                    hmrcFlatRateAmount: hmrcFlatRateAmount.toFixed(2),
+                    pcwRetainedVat: pcwRetainedVat.toFixed(2),
+                    finalPcwAmount: finalPcwAmount.toFixed(2), 
+                    timestamp: new Date(dateValue), // Use a Date object for range queries
+                    createdAt: serverTimestamp(),
+                };
+
+                // 1. Save to Firestore
+                await addDoc(vatRecordsRef, newInvoice);
+
+                // 2. Push to Google Sheet (Async, runs in the background)
+                const sheetData = {
+                    invoiceNumber: invoiceNumber,
+                    date: dateValue,
+                    totalPrice: newInvoice.totalPrice.toFixed(2), 
+                    netPrice: newInvoice.netPrice,
+                    vat20Percent: newInvoice.vat20Percent,
+                    hmrcFlatRateAmount: newInvoice.hmrcFlatRateAmount,
+                    pcwRetainedVat: newInvoice.pcwRetainedVat,
+                    finalPcwAmount: newInvoice.finalPcwAmount,
+                };
+                pushToGoogleSheet(sheetData); 
+
+
+                document.getElementById('invoiceForm').reset();
+                document.getElementById('status-message').textContent = 'Invoice saved to database and sent to Google Sheet API!';
+                document.getElementById('status-message').className = 'text-green-500 font-bold mt-2';
+
+            } catch (error) {
+                console.error("Error saving invoice: ", error);
+                document.getElementById('status-message').textContent = 'Error saving invoice. Check console for details.';
+                document.getElementById('status-message').className = 'text-red-500 font-bold mt-2';
+            }
+        };
+
+        // Real-time listener and UI update function
+        window.setupRealtimeListener = (filter = 'all') => {
+            if (!vatRecordsRef) return;
+            
+            // Get the reference date from the input field
+            const referenceDateString = document.getElementById('filterDate')?.value || null;
+
+            const range = getDateRange(filter, referenceDateString);
+            
+            // Note: Firestore does not support combining range queries (timestamp >=) and orderBy() 
+            // without composite indexes, so we filter by date range if applicable and sort client-side.
+            
+            let filterQuery = vatRecordsRef;
+
+            if (filter !== 'all') {
+                 // Use range query for date filtering
+                 filterQuery = query(vatRecordsRef, where('timestamp', '>=', range.startDate), where('timestamp', '<', range.endDate));
+            } 
+            // We do not use orderBy() in the query to avoid potential index errors and instead sort client-side.
+            
+            const unsubscribe = onSnapshot(filterQuery, (snapshot) => {
+                let totalHMRC = 0;
+                let totalPCW = 0;
+                let totalGross = 0;
+                const invoiceTableBody = document.getElementById('invoiceTableBody');
+                invoiceTableBody.innerHTML = '<tr id="loading-row"><td colspan="8" class="text-center py-4 text-gray-500">Loading records...</td></tr>';
+                
+                const allInvoices = [];
+                snapshot.forEach((doc) => {
+                    allInvoices.push({ id: doc.id, ...doc.data() });
+                });
+                
+                // Clear the loading message once data is fetched (even if empty)
+                invoiceTableBody.innerHTML = '';
+                
+                // --- SORTING LOGIC: Invoice Number (Ascending) then Date (Descending/Newest First) ---
+                allInvoices.sort((a, b) => {
+                    // 1. Primary Sort: Invoice Number (Ascending) - Case Insensitive
+                    const numA = (a.invoiceNumber || '').toUpperCase();
+                    const numB = (b.invoiceNumber || '').toUpperCase();
+
+                    if (numA < numB) {
+                        return -1;
+                    }
+                    if (numA > numB) {
+                        return 1;
+                    }
+
+                    // 2. Secondary Sort: Date/Timestamp (Descending - newest first)
+                    // Convert Firestore Timestamps or date strings to Date objects for comparison
+                    const dateA = a.timestamp ? a.timestamp.toDate() : (a.date ? new Date(a.date) : new Date(0));
+                    const dateB = b.timestamp ? b.timestamp.toDate() : (b.date ? new Date(b.date) : new Date(0));
+                    
+                    // Descending sort (B - A)
+                    return dateB.getTime() - dateA.getTime();
+                });
+                // --- END SORTING LOGIC ---
+
+                if (allInvoices.length === 0) {
+                     invoiceTableBody.innerHTML = '<tr id="no-records-row"><td colspan="8" class="text-center py-4 text-gray-500">No records found for this period.</td></tr>';
+                }
+
+                allInvoices.forEach((invoice) => {
+                    const data = invoice;
+                    // Ensure parsing only happens if data exists and is a valid number string
+                    const hmrc = parseFloat(data.hmrcFlatRateAmount || 0);
+                    const pcw = parseFloat(data.pcwRetainedVat || 0);
+                    const gross = parseFloat(data.totalPrice || 0);
+
+                    totalHMRC += hmrc;
+                    totalPCW += pcw;
+                    totalGross += gross;
+
+                    const row = document.createElement('tr');
+                    row.className = 'border-b hover:bg-gray-50';
+                    
+                    const formattedDate = data.timestamp 
+                        ? data.timestamp.toDate().toLocaleDateString('en-GB') 
+                        : (data.date || 'N/A');
+
+                    row.innerHTML = `
+                        <td class="py-2 px-4 text-sm">${formattedDate}</td>
+                        <td class="py-2 px-4 text-sm">${data.invoiceNumber || 'N/A'}</td>
+                        <td class="py-2 px-4 text-sm text-right">£${parseFloat(data.netPrice).toFixed(2)}</td>
+                        <td class="py-2 px-4 text-sm text-right">£${gross.toFixed(2)}</td>
+                        <td class="py-2 px-4 text-sm text-right text-green-600">£${parseFloat(data.vat20Percent).toFixed(2)}</td>
+                        <td class="py-2 px-4 text-sm text-right text-red-600">£${hmrc.toFixed(2)}</td>
+                        <td class="py-2 px-4 text-sm text-right text-blue-600">£${pcw.toFixed(2)}</td>
+                        <td class="py-2 px-4 text-sm text-right font-bold text-indigo-700">£${parseFloat(data.finalPcwAmount).toFixed(2)}</td>
+                    `;
+                    invoiceTableBody.appendChild(row);
+                });
+
+                // Update Summary Cards
+                document.getElementById('total-hmrc').textContent = `£${totalHMRC.toFixed(2)}`;
+                document.getElementById('total-pcw').textContent = `£${totalPCW.toFixed(2)}`;
+                document.getElementById('total-gross').textContent = `£${totalGross.toFixed(2)}`;
+                document.getElementById('records-count').textContent = allInvoices.length;
+
+                // Update filter button styles
+                document.querySelectorAll('.filter-btn').forEach(btn => {
+                    // Check if the button ID matches the current filter
+                    if (btn.id === `${filter}-filter`) {
+                        btn.classList.add('active');
+                    } else {
+                        btn.classList.remove('active');
+                    }
+                });
+
+            }, (error) => {
+                console.error("Firestore onSnapshot error:", error);
+                document.getElementById('invoiceTableBody').innerHTML = '<tr id="error-row"><td colspan="8" class="text-center py-4 text-red-500">Error loading records. See console.</td></tr>';
+            });
+            // Cleanup function returned for potential future use, though not strictly needed here
+            return unsubscribe; 
+        };
+        
+        // Helper to handle date change and re-run filter
+        window.handleDateChange = () => {
+             // Find the currently active filter button
+            const activeBtn = document.querySelector('.filter-btn.active');
+            if (activeBtn) {
+                const currentFilter = activeBtn.id.replace('-filter', '');
+                window.setupRealtimeListener(currentFilter);
+            }
+        };
+
+
+        window.initFirebase();
+    </script>
+</head>
+<body class="p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-800 mb-6 text-center">
+            PCW Flat Rate VAT Manager
+        </h1>
+        <p id="user-id" class="text-sm text-gray-500 mb-6 text-center"></p>
+
+        <!-- New Invoice Entry Form -->
+        <div class="container-card mb-8">
+            <h2 class="text-xl font-semibold mb-4 text-gray-700">Record New Invoice (FRS 10.5%)</h2>
+            
+            <form id="invoiceForm" onsubmit="saveInvoice(event)" class="grid grid-cols-1 sm:grid-cols-4 gap-4 items-end">
+                
+                <div>
+                    <label for="invoiceNumber" class="block text-sm font-medium text-gray-700 mb-1">Invoice No.</label>
+                    <!-- Force consistent height -->
+                    <input type="text" id="invoiceNumber" placeholder="INV-001" required class="input-style w-full h-10">
+                </div>
+
+                <div>
+                    <label for="invoiceDate" class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                    <!-- Force consistent height -->
+                    <input type="date" id="invoiceDate" required class="input-style w-full h-10">
+                </div>
+                
+                <div>
+                    <label for="totalGross" class="block text-sm font-medium text-gray-700 mb-1">Total Price (Gross £)</label>
+                    <!-- Force consistent height -->
+                    <input type="number" id="totalGross" step="0.01" min="0.01" placeholder="120.00" required class="input-style w-full h-10">
+                </div>
+                
+                <button type="submit" class="btn-primary w-full sm:w-auto">
+                    Add Invoice
+                </button>
+            </form>
+            <p id="status-message" class="mt-4 text-center"></p>
+        </div>
+
+        <!-- Summary & Filter Controls -->
+        <div class="container-card mb-8">
+            <h2 class="text-xl font-semibold mb-4 text-gray-700">Summary Totals</h2>
+            
+            <!-- Date Input -->
+            <div class="flex flex-col sm:flex-row justify-center items-center gap-4 mb-4">
+                <label for="filterDate" class="text-sm font-medium text-gray-700 whitespace-nowrap">Filter **Reference Date**:</label>
+                <input type="date" id="filterDate" class="input-style w-full sm:w-auto" onchange="handleDateChange()">
+            </div>
+            
+            <!-- Filter Buttons -->
+            <div class="flex flex-wrap justify-center gap-2 mb-6">
+                <button id="daily-filter" onclick="setupRealtimeListener('daily')" class="filter-btn">Daily</button>
+                <button id="weekly-filter" onclick="setupRealtimeListener('weekly')" class="filter-btn">Weekly</button>
+                <button id="monthly-filter" onclick="setupRealtimeListener('monthly')" class="filter-btn active">Monthly</button>
+                <button id="yearly-filter" onclick="setupRealtimeListener('yearly')" class="filter-btn">Yearly</button>
+                <button id="all-filter" onclick="setupRealtimeListener('all')" class="filter-btn">All Time</button>
+            </div>
+
+            <!-- Summary Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="summary-box">
+                    <p class="text-sm font-medium text-gray-600">Total VAT to pay to HMRC (10.5%)</p>
+                    <p id="total-hmrc" class="text-2xl font-bold text-red-700 mt-1">£0.00</p>
+                    <p class="text-xs text-gray-500 mt-1" id="records-count-hmrc">VAT payable based on <span id="records-count">0</span> records.</p>
+                </div>
+                
+                <div class="summary-box border-left-4 border-green-500">
+                    <p class="text-sm font-medium text-gray-600">Total VAT Retained (PCW Profit)</p>
+                    <p id="total-pcw" class="text-2xl font-bold text-green-700 mt-1">£0.00</p>
+                    <p class="text-xs text-gray-500 mt-1">Total VAT profit (20% VAT - 10.5% FRS)</p>
+                </div>
+
+                <div class="summary-box border-left-4 border-gray-500">
+                    <p class="text-sm font-medium text-gray-600">Total Gross Turnover</p>
+                    <p id="total-gross" class="text-2xl font-bold text-gray-800 mt-1">£0.00</p>
+                    <p class="text-xs text-gray-500 mt-1">Sum of all invoice gross totals.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Invoice List -->
+        <div class="container-card overflow-x-auto">
+            <h2 class="text-xl font-semibold mb-4 text-gray-700">Invoice Records</h2>
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                        <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Invoice No.</th>
+                        <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Net Price (£)</th>
+                        <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Gross (£)</th>
+                        <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">20% VAT</th>
+                        <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">HMRC FRS (10.5%)</th>
+                        <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">PCW Retained</th>
+                        <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Final PCW (£)</th>
+                    </tr>
+                </thead>
+                <tbody id="invoiceTableBody" class="bg-white divide-y divide-gray-200">
+                    <!-- Invoice rows will be inserted here by JavaScript -->
+                    <tr id="loading-row"><td colspan="8" class="text-center py-4 text-gray-500">Loading records...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+    </div>
+</body>
+</html>
