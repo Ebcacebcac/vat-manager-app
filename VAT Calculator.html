@@ -67,7 +67,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, addDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { getFirestore, doc, addDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global variables provided by the environment
         const appId = 'vat-totals-app';
@@ -154,9 +154,10 @@
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
                         userId = user.uid;
-                        document.getElementById('user-id').textContent = `User ID: ${userId}`;
-                        vatRecordsRef = collection(db, `artifacts/${appId}/users/${userId}/vat_records`);
-                        console.log("Firebase initialized and user authenticated:", userId);
+                        // Shared dataset (no per-user scoping)
+                        document.getElementById('user-id').textContent = 'Connected (shared mode)';
+                        vatRecordsRef = collection(db, `artifacts/${appId}/vat_records`);
+                        console.log("Firebase initialized and authenticated (shared mode). UID:", userId);
                         
                         // Set the default filter date to today
                         const today = new Date().toISOString().split('T')[0];
@@ -213,7 +214,7 @@
         // Called when a new invoice is submitted
         window.saveInvoice = async (event) => {
             event.preventDefault();
-            if (!userId || !vatRecordsRef) {
+            if (!vatRecordsRef) {
                 document.getElementById('status-message').textContent = 'Error: Database connection not ready.';
                 return;
             }
@@ -289,6 +290,18 @@
             }
         };
 
+        // Delete an invoice by document id
+        window.deleteInvoice = async (id) => {
+            try {
+                const ok = confirm('Delete this invoice? This cannot be undone.');
+                if (!ok) return;
+                await deleteDoc(doc(vatRecordsRef, id));
+            } catch (error) {
+                console.error('Error deleting invoice:', error);
+                alert('Failed to delete invoice. See console for details.');
+            }
+        };
+
         // Real-time listener and UI update function
         window.setupRealtimeListener = (filter = 'all') => {
             if (!vatRecordsRef) return;
@@ -353,6 +366,7 @@
 
                 allInvoices.forEach((invoice) => {
                     const data = invoice;
+                    const id = invoice.id;
                     // Ensure parsing only happens if data exists and is a valid number string
                     const hmrc = parseFloat(data.hmrcFlatRateAmount || 0);
                     const pcw = parseFloat(data.pcwRetainedVat || 0);
@@ -378,6 +392,9 @@
                         <td class="py-2 px-4 text-sm text-right text-red-600">£${hmrc.toFixed(2)}</td>
                         <td class="py-2 px-4 text-sm text-right text-blue-600">£${pcw.toFixed(2)}</td>
                         <td class="py-2 px-4 text-sm text-right font-bold text-indigo-700">£${parseFloat(data.finalPcwAmount).toFixed(2)}</td>
+                        <td class="py-2 px-4 text-sm text-right">
+                            <button class="px-3 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50" onclick="deleteInvoice('${id}')">Delete</button>
+                        </td>
                     `;
                     invoiceTableBody.appendChild(row);
                 });
@@ -514,6 +531,7 @@
                         <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">HMRC FRS (10.5%)</th>
                         <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">PCW Retained</th>
                         <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Final PCW (£)</th>
+                        <th class="py-3 px-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
                 <tbody id="invoiceTableBody" class="bg-white divide-y divide-gray-200">
