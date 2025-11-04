@@ -70,8 +70,15 @@
         import { getFirestore, doc, addDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global variables provided by the environment
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = 'vat-totals-app';
+        const firebaseConfig = {
+            apiKey: "AIzaSyC-_vJNicITAlLxIKwDigUwlCNWtUCzfKE",
+            authDomain: "vat-totals.firebaseapp.com",
+            projectId: "vat-totals",
+            storageBucket: "vat-totals.firebasestorage.app",
+            messagingSenderId: "124485403709",
+            appId: "1:124485403709:web:4044ca5bebd1f9bed91654"
+        };
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         let db, auth, userId = null;
