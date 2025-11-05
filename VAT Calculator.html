@@ -81,8 +81,9 @@
         };
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-        let db, auth, userId = null;
+    let db, auth, userId = null;
         let vatRecordsRef;
+    let latestTotals = { hmrc: 0, net: 0, gross: 0 };
 
         // --- IMPORTANT: GOOGLE APPS SCRIPT WEB APP URL ---
         // This is the URL to your deployed Google Apps Script for Google Sheet integration.
@@ -90,6 +91,18 @@
         // --------------------------------------------------
 
         setLogLevel('debug'); // Enable Firestore logging
+        // Update the top banner total based on the selected mode
+        const updateTopBanner = () => {
+            const el = document.getElementById('hmrc-top-total');
+            const modeSel = document.getElementById('top-total-mode');
+            if (!el) return;
+            const mode = modeSel ? modeSel.value : 'hmrc';
+            let value = 0;
+            if (mode === 'net') value = latestTotals.net;
+            else if (mode === 'gross') value = latestTotals.gross;
+            else value = latestTotals.hmrc; // default hmrc
+            el.textContent = `£${Number(value || 0).toFixed(2)}`;
+        };
 
         /**
          * Utility function to determine the start and end dates for filtering
@@ -166,6 +179,10 @@
                             filterDateInput.value = today;
                         }
                         
+                        // Wire up top banner mode change
+                        const modeSel = document.getElementById('top-total-mode');
+                        if (modeSel) modeSel.addEventListener('change', updateTopBanner);
+
                         // Set up initial listener after successful auth (All Time)
                         window.setupRealtimeListener('all'); 
                     } else {
@@ -323,9 +340,10 @@
             // We do not use orderBy() in the query to avoid potential index errors and instead sort client-side.
             
             const unsubscribe = onSnapshot(filterQuery, (snapshot) => {
-                let totalHMRC = 0;
-                let totalPCW = 0;
-                let totalGross = 0;
+                let totalHMRC = 0; // 10.5% of gross
+                let totalPCW = 0;  // retained VAT
+                let totalGross = 0; // gross
+                let totalNet = 0;   // net (gross without 20% VAT)
                 const invoiceTableBody = document.getElementById('invoiceTableBody');
                 invoiceTableBody.innerHTML = '<tr id="loading-row"><td colspan="8" class="text-center py-4 text-gray-500">Loading records...</td></tr>';
                 
@@ -371,10 +389,12 @@
                     const hmrc = parseFloat(data.hmrcFlatRateAmount || 0);
                     const pcw = parseFloat(data.pcwRetainedVat || 0);
                     const gross = parseFloat(data.totalPrice || 0);
+                    const net = parseFloat(data.netPrice || 0);
 
                     totalHMRC += hmrc;
                     totalPCW += pcw;
                     totalGross += gross;
+                    totalNet += isNaN(net) ? 0 : net;
 
                     const row = document.createElement('tr');
                     row.className = 'border-b hover:bg-gray-50';
@@ -402,9 +422,9 @@
                 document.getElementById('total-gross').textContent = `£${totalGross.toFixed(2)}`;
                 document.getElementById('records-count').textContent = allInvoices.length;
 
-                // Update top HMRC banner
-                const hmrcTop = document.getElementById('hmrc-top-total');
-                if (hmrcTop) hmrcTop.textContent = `£${totalHMRC.toFixed(2)}`;
+                // Update cached totals and refresh top banner
+                latestTotals = { hmrc: totalHMRC, net: totalNet, gross: totalGross };
+                updateTopBanner();
 
                 // Update filter button styles
                 document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -419,8 +439,8 @@
             }, (error) => {
                 console.error("Firestore onSnapshot error:", error);
                 document.getElementById('invoiceTableBody').innerHTML = '<tr id="error-row"><td colspan="8" class="text-center py-4 text-red-500">Error loading records. See console.</td></tr>';
-                const hmrcTop = document.getElementById('hmrc-top-total');
-                if (hmrcTop) hmrcTop.textContent = '£0.00';
+                latestTotals = { hmrc: 0, net: 0, gross: 0 };
+                updateTopBanner();
             });
             // Cleanup function returned for potential future use, though not strictly needed here
             return unsubscribe; 
@@ -448,9 +468,22 @@
         </h1>
         <p id="user-id" class="text-sm text-gray-500 mb-6 text-center"></p>
 
-        <!-- Real-time HMRC VAT total banner -->
-        <div id="hmrc-top-banner" class="mb-6 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-center">
-            HMRC VAT total: <span id="hmrc-top-total" class="font-bold">£0.00</span>
+        <!-- Real-time top total banner with mode selector -->
+        <div id="hmrc-top-banner" class="mb-6 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800">
+            <div class="flex flex-col sm:flex-row items-center gap-2 justify-between">
+                <div class="text-center sm:text-left">
+                    <span class="mr-2">Top total:</span>
+                    <span id="hmrc-top-total" class="font-bold">£0.00</span>
+                </div>
+                <label class="flex items-center gap-2 text-sm">
+                    <span>Show:</span>
+                    <select id="top-total-mode" class="border border-red-300 bg-white rounded px-2 py-1 text-sm">
+                        <option value="hmrc" selected>HMRC (10.5%)</option>
+                        <option value="net">Net (ex VAT)</option>
+                        <option value="gross">Gross</option>
+                    </select>
+                </label>
+            </div>
         </div>
 
         <!-- New Invoice Entry Form -->
