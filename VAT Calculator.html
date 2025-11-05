@@ -445,6 +445,16 @@
             // Cleanup function returned for potential future use, though not strictly needed here
             return unsubscribe; 
         };
+
+        // Toggle visibility of the reconcile panel
+        window.toggleReconcile = () => {
+            const panel = document.getElementById('reconcile-panel');
+            const btn = document.getElementById('reconcile-toggle-btn');
+            if (!panel || !btn) return;
+            const nowHidden = panel.classList.toggle('hidden');
+            btn.textContent = nowHidden ? 'Show Tools' : 'Hide Tools';
+            btn.setAttribute('aria-expanded', String(!nowHidden));
+        };
         
         // Bulk remove Firestore invoices by invoice number (to match manual Sheet deletions)
         window.bulkRemoveInvoices = async () => {
@@ -596,8 +606,13 @@
             </div>
         </div>
 
-        <!-- Reconcile UI with Google Sheet deletions -->
-        <div class="container-card mb-8">
+        <!-- Tools toggle -->
+        <div class="flex justify-end mb-3">
+            <button id="reconcile-toggle-btn" onclick="toggleReconcile()" aria-controls="reconcile-panel" aria-expanded="false" class="px-3 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-50">Show Tools</button>
+        </div>
+
+        <!-- Reconcile UI with Google Sheet deletions (hidden by default) -->
+        <div id="reconcile-panel" class="container-card mb-8 hidden">
             <h2 class="text-xl font-semibold mb-2 text-gray-700">Reconcile UI with Sheet</h2>
             <p class="text-sm text-gray-600 mb-3">Paste invoice numbers you removed from the Google Sheet (one per line) to remove them from the UI (Firestore).</p>
             <textarea id="bulkInvoiceNumbers" rows="3" placeholder="INV-001\nINV-002" class="input-style w-full mb-2"></textarea>
