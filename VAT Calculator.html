@@ -571,8 +571,9 @@
                 alert('No records to export for the selected period.');
                 return;
             }
-            const jspdf = window.jspdf;
-            if (!jspdf || !jspdf.jsPDF || !('autoTable' in (jspdf.jsPDF.prototype))) {
+            const jspdfUMD = window.jspdf;
+            const JSPDFCtor = jspdfUMD?.jsPDF || window.jsPDF; // support older globals just in case
+            if (!JSPDFCtor) {
                 alert('PDF library not loaded yet. Please try again in a moment.');
                 return;
             }
@@ -581,7 +582,11 @@
             const body = latestInvoices.map(inv => cols.map(k => getValue(inv, k)));
             const label = buildPeriodLabel();
 
-            const doc = new jspdf.jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
+            const doc = new JSPDFCtor({ orientation: 'p', unit: 'pt', format: 'a4' });
+            if (typeof doc.autoTable !== 'function') {
+                alert('PDF table plugin not loaded yet. Please try again in a moment.');
+                return;
+            }
             doc.setFontSize(14);
             doc.text(`VAT Records — ${label}`, 40, 40);
             doc.setFontSize(10);
