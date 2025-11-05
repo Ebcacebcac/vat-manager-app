@@ -197,7 +197,7 @@
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify(invoiceData)
+                        body: JSON.stringify({ action: 'create', ...invoiceData })
                     });
 
                     // In 'no-cors' mode, we can't reliably check the status. 
