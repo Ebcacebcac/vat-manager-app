@@ -6,6 +6,9 @@
     <title>Flat Rate VAT Calculator (10.5%)</title>
     <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- jsPDF and AutoTable for PDF export -->
+    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
     <!-- Use Inter font -->
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
@@ -82,7 +85,11 @@
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
     let db, auth, userId = null;
-        let vatRecordsRef;
+    let vatRecordsRef;
+    // Cache of latest filtered results for export/print
+    let latestInvoices = [];
+    let currentFilter = 'all';
+    let currentReferenceDate = null; // YYYY-MM-DD or null
     let latestTotals = { hmrc: 0, net: 0, gross: 0 };
 
         // --- IMPORTANT: GOOGLE APPS SCRIPT WEB APP URL ---
@@ -325,6 +332,8 @@
             
             // Get the reference date from the input field
             const referenceDateString = document.getElementById('filterDate')?.value || null;
+            currentFilter = filter;
+            currentReferenceDate = referenceDateString;
 
             const range = getDateRange(filter, referenceDateString);
             
@@ -377,6 +386,9 @@
                     return dateB.getTime() - dateA.getTime();
                 });
                 // --- END SORTING LOGIC ---
+
+                // Cache for export/print
+                latestInvoices = allInvoices;
 
              if (allInvoices.length === 0) {
                  invoiceTableBody.innerHTML = '<tr id="no-records-row"><td colspan="8" class="text-center py-4 text-gray-500">No records found for this period.</td></tr>';
@@ -444,6 +456,148 @@
             });
             // Cleanup function returned for potential future use, though not strictly needed here
             return unsubscribe; 
+        };
+
+        // Column toggles helpers
+        const columnConfig = [
+            { key: 'date', title: 'Date', locked: true },
+            { key: 'invoiceNumber', title: 'Invoice Number', locked: true },
+            { key: 'netPrice', title: 'Net Price (£)' },
+            { key: 'totalPrice', title: 'Gross (£)' },
+            { key: 'vat20Percent', title: '20% VAT' },
+            { key: 'hmrcFlatRateAmount', title: 'HMRC FRS (10.5%)' },
+            { key: 'pcwRetainedVat', title: 'PCW Retained' },
+            { key: 'finalPcwAmount', title: 'Final PCW (£)' }
+        ];
+
+        window.toggleColumn = (btn) => {
+            if (btn.dataset.locked === 'true') return; // always on
+            const pressed = btn.getAttribute('aria-pressed') === 'true';
+            const now = !pressed;
+            btn.setAttribute('aria-pressed', String(now));
+            btn.classList.toggle('bg-green-600', now);
+            btn.classList.toggle('text-white', now);
+            btn.classList.toggle('bg-red-500', !now);
+            btn.classList.toggle('text-white', !now);
+        };
+
+        const getSelectedColumns = () => {
+            const buttons = document.querySelectorAll('#column-toggle-group .col-toggle');
+            const selected = [];
+            buttons.forEach(b => {
+                if (b.getAttribute('aria-pressed') === 'true') selected.push(b.dataset.key);
+            });
+            // Ensure locked columns present
+            if (!selected.includes('date')) selected.unshift('date');
+            if (!selected.includes('invoiceNumber')) selected.splice(1, 0, 'invoiceNumber');
+            return selected;
+        };
+
+        const formatDateCell = (inv) => {
+            const d = inv.timestamp ? inv.timestamp.toDate() : (inv.date ? new Date(inv.date) : null);
+            return d ? d.toLocaleDateString('en-GB') : '';
+        };
+
+        const getValue = (inv, key) => {
+            if (key === 'date') return formatDateCell(inv);
+            if (key === 'invoiceNumber') return inv.invoiceNumber || '';
+            const val = parseFloat(inv[key] ?? '');
+            return isNaN(val) ? '' : val.toFixed(2);
+        };
+
+        const csvEscape = (s) => {
+            const str = String(s ?? '');
+            if (/[",\n]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
+            return str;
+        };
+
+        const buildPeriodLabel = () => {
+            if (currentFilter === 'all') return 'All-Time';
+            if (!currentReferenceDate) return currentFilter;
+            // Derive start/end similar to getDateRange
+            const { startDate, endDate } = getDateRange(currentFilter, currentReferenceDate);
+            const fmt = (d) => d.toLocaleDateString('en-GB');
+            // endDate is exclusive, subtract 1 day
+            const end = new Date(endDate);
+            end.setDate(end.getDate() - 1);
+            return `${currentFilter} ${fmt(startDate)} to ${fmt(end)}`;
+        };
+
+        window.exportSelectedPeriod = () => {
+            if (!latestInvoices || latestInvoices.length === 0) {
+                alert('No records to export for the selected period.');
+                return;
+            }
+            const cols = getSelectedColumns();
+            const headers = cols.map(k => (columnConfig.find(c => c.key === k)?.title) || k);
+            const rows = latestInvoices.map(inv => cols.map(k => csvEscape(getValue(inv, k))).join(','));
+            const csv = ['\uFEFF' + headers.join(','), ...rows].join('\n');
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const label = buildPeriodLabel().replace(/\s+/g, '_');
+            link.href = url;
+            link.download = `vat_export_${label}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        };
+
+        window.printSelectedPeriod = () => {
+            if (!latestInvoices || latestInvoices.length === 0) {
+                alert('No records to print for the selected period.');
+                return;
+            }
+            const cols = getSelectedColumns();
+            const headers = cols.map(k => (columnConfig.find(c => c.key === k)?.title) || k);
+            const label = buildPeriodLabel();
+            const htmlRows = latestInvoices.map(inv => '<tr>' + cols.map(k => `<td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:${['date','invoiceNumber'].includes(k)?'left':'right'}">${getValue(inv, k)}</td>`).join('') + '</tr>').join('');
+            const table = `
+                <table style="width:100%;border-collapse:collapse;font-family:Arial, sans-serif;font-size:12px;">
+                    <thead>
+                        <tr>${headers.map(h => `<th style=\"padding:8px 10px;text-align:left;border-bottom:2px solid #111827;\">${h}</th>`).join('')}</tr>
+                    </thead>
+                    <tbody>${htmlRows}</tbody>
+                </table>`;
+            const w = window.open('', '_blank');
+            if (!w) return alert('Popup blocked. Please allow popups to print.');
+            w.document.write(`<!DOCTYPE html><html><head><title>VAT ${label}</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><style>@media print { body { -webkit-print-color-adjust: exact; } }</style></head><body><h2 style=\"font-family:Arial,sans-serif\">VAT Records — ${label}</h2>${table}<script>window.onload=function(){window.focus();window.print();setTimeout(function(){window.close();},300);};<\/script></body></html>`);
+            w.document.close();
+        };
+
+        window.exportSelectedPeriodPDF = () => {
+            if (!latestInvoices || latestInvoices.length === 0) {
+                alert('No records to export for the selected period.');
+                return;
+            }
+            const jspdf = window.jspdf;
+            if (!jspdf || !jspdf.jsPDF || !('autoTable' in (jspdf.jsPDF.prototype))) {
+                alert('PDF library not loaded yet. Please try again in a moment.');
+                return;
+            }
+            const cols = getSelectedColumns();
+            const headers = cols.map(k => (columnConfig.find(c => c.key === k)?.title) || k);
+            const body = latestInvoices.map(inv => cols.map(k => getValue(inv, k)));
+            const label = buildPeriodLabel();
+
+            const doc = new jspdf.jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
+            doc.setFontSize(14);
+            doc.text(`VAT Records — ${label}`, 40, 40);
+            doc.setFontSize(10);
+            doc.autoTable({
+                startY: 60,
+                head: [headers],
+                body,
+                styles: { fontSize: 9, cellPadding: 4 },
+                headStyles: { fillColor: [17, 24, 39], textColor: 255 },
+                columnStyles: cols.reduce((acc, k, idx) => {
+                    acc[idx] = { halign: (k === 'date' || k === 'invoiceNumber') ? 'left' : 'right' };
+                    return acc;
+                }, {})
+            });
+            const filename = `vat_export_${label.replace(/\s+/g, '_')}.pdf`;
+            doc.save(filename);
         };
 
         // Toggle visibility of the reconcile panel
@@ -620,6 +774,24 @@
                 <button onclick="bulkRemoveInvoices()" class="px-4 py-2 rounded bg-gray-800 text-white hover:bg-black">Remove From UI</button>
             </div>
             <p id="bulk-status" class="text-sm mt-2"></p>
+            <hr class="my-4 border-gray-200" />
+            <h2 class="text-xl font-semibold mb-2 text-gray-700">Export / Print Selected Period</h2>
+            <p class="text-sm text-gray-600 mb-3">Choose the columns to include. Date and Invoice Number are always included.</p>
+            <div id="column-toggle-group" class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="date" data-locked="true" aria-pressed="true">Date</button>
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="invoiceNumber" data-locked="true" aria-pressed="true">Invoice Number</button>
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="netPrice" aria-pressed="true" onclick="toggleColumn(this)">Net Price (£)</button>
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="totalPrice" aria-pressed="true" onclick="toggleColumn(this)">Gross (£)</button>
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="vat20Percent" aria-pressed="true" onclick="toggleColumn(this)">20% VAT</button>
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="hmrcFlatRateAmount" aria-pressed="true" onclick="toggleColumn(this)">HMRC FRS (10.5%)</button>
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="pcwRetainedVat" aria-pressed="true" onclick="toggleColumn(this)">PCW Retained</button>
+                <button type="button" class="col-toggle px-3 py-2 rounded bg-green-600 text-white" data-key="finalPcwAmount" aria-pressed="true" onclick="toggleColumn(this)">Final PCW (£)</button>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+                <button onclick="exportSelectedPeriod()" class="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">Export CSV</button>
+                <button onclick="exportSelectedPeriodPDF()" class="px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700">Export PDF</button>
+                <button onclick="printSelectedPeriod()" class="px-4 py-2 rounded bg-gray-700 text-white hover:bg-gray-800">Print</button>
+            </div>
         </div>
 
         <!-- Invoice List -->
