@@ -67,7 +67,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, doc, getDoc, addDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global variables provided by the environment
         const appId = 'vat-totals-app';
@@ -253,6 +253,13 @@
                 return;
             }
 
+            // Firestore document IDs cannot contain forward slashes
+            if (invoiceNumber.includes('/')) {
+                document.getElementById('status-message').textContent = 'Invoice number cannot contain "/".';
+                document.getElementById('status-message').className = 'text-red-500 font-bold mt-2';
+                return;
+            }
+
             try {
                 // VAT Calculations (UK Standard Rate 20%)
                 const standardVATRate = 0.20;
@@ -286,8 +293,8 @@
                     createdAt: serverTimestamp(),
                 };
 
-                // 1. Save to Firestore
-                await addDoc(vatRecordsRef, newInvoice);
+                // 1. Save to Firestore using invoice number as the document ID
+                await setDoc(doc(vatRecordsRef, invoiceNumber), newInvoice);
 
                 // 2. Push to Google Sheet (Async, runs in the background)
                 const sheetData = {
@@ -317,36 +324,20 @@
             }
         };
 
-        // Delete an invoice by document id (and request deletion in Google Sheet)
-        window.deleteInvoice = async (id) => {
+        // Delete an invoice by document id (invoiceNumber) and request deletion in Google Sheet
+        window.deleteInvoice = async (id, invoiceNumberParam) => {
             try {
                 const ok = confirm('Delete this invoice? This cannot be undone.');
                 if (!ok) return;
-                // Try to load the doc to get identifying fields for the sheet
-                let invoiceNumber = undefined;
-                let date = undefined;
-                try {
-                    const snap = await getDoc(doc(vatRecordsRef, id));
-                    if (snap.exists()) {
-                        const data = snap.data();
-                        invoiceNumber = data?.invoiceNumber;
-                        date = data?.date;
-                    }
-                } catch (e) {
-                    console.warn('Could not load invoice before delete:', e);
-                }
 
-                // Best-effort: request delete in sheet first
-                if (invoiceNumber) {
-                    try {
-                        await pushDeleteToGoogleSheet(invoiceNumber, date);
-                    } catch (e) {
-                        // Network error only; abort Firestore delete to avoid sheet mismatch
-                        alert('Network error contacting Google Sheet API. Deletion cancelled. Please try again.');
-                        return;
-                    }
-                } else {
-                    console.warn('Invoice number missing; cannot request sheet delete. Proceeding with Firestore delete only.');
+                // Use provided invoice number if available (for legacy docs), else fall back to id
+                const invoiceNumberForSheet = (invoiceNumberParam && invoiceNumberParam.trim()) ? invoiceNumberParam.trim() : id;
+                try {
+                    await pushDeleteToGoogleSheet(invoiceNumberForSheet);
+                } catch (e) {
+                    // Network error only; abort Firestore delete to avoid sheet mismatch
+                    alert('Network error contacting Google Sheet API. Deletion cancelled. Please try again.');
+                    return;
                 }
 
                 await deleteDoc(doc(vatRecordsRef, id));
@@ -447,7 +438,7 @@
                         <td class="py-2 px-4 text-sm text-right text-blue-600">£${pcw.toFixed(2)}</td>
                         <td class="py-2 px-4 text-sm text-right font-bold text-indigo-700">£${parseFloat(data.finalPcwAmount).toFixed(2)}</td>
                         <td class="py-2 px-4 text-sm text-right">
-                            <button class="px-3 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50" onclick="deleteInvoice('${id}')">Delete</button>
+                            <button class="px-3 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50" data-inv="${(data.invoiceNumber || '').replace(/\"/g, '&quot;')}" onclick="deleteInvoice('${id}', this.dataset.inv)">Delete</button>
                         </td>
                     `;
                     invoiceTableBody.appendChild(row);
@@ -590,7 +581,7 @@
                 </thead>
                 <tbody id="invoiceTableBody" class="bg-white divide-y divide-gray-200">
                     <!-- Invoice rows will be inserted here by JavaScript -->
-                    <tr id="loading-row"><td colspan="8" class="text-center py-4 text-gray-500">Loading records...</td></tr>
+                    <tr id="loading-row"><td colspan="9" class="text-center py-4 text-gray-500">Loading records...</td></tr>
                 </tbody>
             </table>
         </div>
