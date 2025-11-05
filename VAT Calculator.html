@@ -67,7 +67,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, doc, setDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { getFirestore, doc, setDoc, deleteDoc, getDocs, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global variables provided by the environment
         const appId = 'vat-totals-app';
@@ -446,6 +446,44 @@
             return unsubscribe; 
         };
         
+        // Bulk remove Firestore invoices by invoice number (to match manual Sheet deletions)
+        window.bulkRemoveInvoices = async () => {
+            if (!vatRecordsRef) return;
+            const text = (document.getElementById('bulkInvoiceNumbers')?.value || '').trim();
+            const statusEl = document.getElementById('bulk-status');
+            if (!text) {
+                if (statusEl) { statusEl.textContent = 'Enter one or more invoice numbers (one per line).'; statusEl.className = 'text-red-600 text-sm mt-2'; }
+                return;
+            }
+            const list = Array.from(new Set(text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)));
+            const ok = confirm(`Remove ${list.length} invoice(s) from the UI (Firestore)? This does not touch the Google Sheet.`);
+            if (!ok) return;
+            let removedById = 0, removedByQuery = 0, errors = 0;
+            for (const inv of list) {
+                try {
+                    // Try delete by doc ID (new scheme)
+                    await deleteDoc(doc(vatRecordsRef, inv));
+                    removedById++;
+                    // Also attempt legacy docs where ID != invoiceNumber
+                    const q = query(vatRecordsRef, where('invoiceNumber', '==', inv));
+                    const snaps = await getDocs(q);
+                    const deletions = [];
+                    snaps.forEach(d => deletions.push(deleteDoc(doc(vatRecordsRef, d.id))));
+                    if (deletions.length) {
+                        await Promise.allSettled(deletions);
+                        removedByQuery += deletions.length;
+                    }
+                } catch (e) {
+                    console.error('Bulk remove error for', inv, e);
+                    errors++;
+                }
+            }
+            if (statusEl) {
+                statusEl.textContent = `Removed ${removedById} by ID and ${removedByQuery} legacy record(s). ${errors ? errors + ' error(s).' : 'Done.'}`;
+                statusEl.className = errors ? 'text-red-600 text-sm mt-2' : 'text-green-600 text-sm mt-2';
+            }
+        };
+        
         // Helper to handle date change and re-run filter
         window.handleDateChange = () => {
              // Find the currently active filter button
@@ -556,6 +594,17 @@
                     <p class="text-xs text-gray-500 mt-1">Sum of all invoice gross totals.</p>
                 </div>
             </div>
+        </div>
+
+        <!-- Reconcile UI with Google Sheet deletions -->
+        <div class="container-card mb-8">
+            <h2 class="text-xl font-semibold mb-2 text-gray-700">Reconcile UI with Sheet</h2>
+            <p class="text-sm text-gray-600 mb-3">Paste invoice numbers you removed from the Google Sheet (one per line) to remove them from the UI (Firestore).</p>
+            <textarea id="bulkInvoiceNumbers" rows="3" placeholder="INV-001\nINV-002" class="input-style w-full mb-2"></textarea>
+            <div class="flex justify-end">
+                <button onclick="bulkRemoveInvoices()" class="px-4 py-2 rounded bg-gray-800 text-white hover:bg-black">Remove From UI</button>
+            </div>
+            <p id="bulk-status" class="text-sm mt-2"></p>
         </div>
 
         <!-- Invoice List -->
