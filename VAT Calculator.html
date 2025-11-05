@@ -67,7 +67,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, doc, addDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { getFirestore, doc, getDoc, addDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global variables provided by the environment
         const appId = 'vat-totals-app';
@@ -210,6 +210,29 @@
             }
         };
 
+        // Function to request deletion from Google Sheets via Apps Script
+        const pushDeleteToGoogleSheet = async (invoiceNumber, date) => {
+            if (!GOOGLE_SHEET_API_URL || GOOGLE_SHEET_API_URL === "YOUR_APPS_SCRIPT_WEB_APP_URL_HERE") {
+                console.warn("Google Sheet API URL is not set. Delete not sent to Sheet.");
+                return;
+            }
+
+            try {
+                const payload = { action: 'delete', invoiceNumber, date };
+                await fetch(GOOGLE_SHEET_API_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                // In 'no-cors' we can't verify success; assume success unless network error.
+                console.log(`Requested sheet delete for invoice ${invoiceNumber}`);
+            } catch (error) {
+                console.error('Error sending delete to Google Sheet API:', error);
+                throw error;
+            }
+        };
+
 
         // Called when a new invoice is submitted
         window.saveInvoice = async (event) => {
@@ -285,16 +308,47 @@
 
             } catch (error) {
                 console.error("Error saving invoice: ", error);
-                document.getElementById('status-message').textContent = 'Error saving invoice. Check console for details.';
+                if (error?.code === 'permission-denied' || /insufficient permissions/i.test(String(error?.message))) {
+                    document.getElementById('status-message').textContent = 'Permissions error: update Firestore rules to allow writes to artifacts/vat-totals-app/vat_records.';
+                } else {
+                    document.getElementById('status-message').textContent = 'Error saving invoice. Check console for details.';
+                }
                 document.getElementById('status-message').className = 'text-red-500 font-bold mt-2';
             }
         };
 
-        // Delete an invoice by document id
+        // Delete an invoice by document id (and request deletion in Google Sheet)
         window.deleteInvoice = async (id) => {
             try {
                 const ok = confirm('Delete this invoice? This cannot be undone.');
                 if (!ok) return;
+                // Try to load the doc to get identifying fields for the sheet
+                let invoiceNumber = undefined;
+                let date = undefined;
+                try {
+                    const snap = await getDoc(doc(vatRecordsRef, id));
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        invoiceNumber = data?.invoiceNumber;
+                        date = data?.date;
+                    }
+                } catch (e) {
+                    console.warn('Could not load invoice before delete:', e);
+                }
+
+                // Best-effort: request delete in sheet first
+                if (invoiceNumber) {
+                    try {
+                        await pushDeleteToGoogleSheet(invoiceNumber, date);
+                    } catch (e) {
+                        // Network error only; abort Firestore delete to avoid sheet mismatch
+                        alert('Network error contacting Google Sheet API. Deletion cancelled. Please try again.');
+                        return;
+                    }
+                } else {
+                    console.warn('Invoice number missing; cannot request sheet delete. Proceeding with Firestore delete only.');
+                }
+
                 await deleteDoc(doc(vatRecordsRef, id));
             } catch (error) {
                 console.error('Error deleting invoice:', error);
@@ -327,7 +381,7 @@
                 let totalPCW = 0;
                 let totalGross = 0;
                 const invoiceTableBody = document.getElementById('invoiceTableBody');
-                invoiceTableBody.innerHTML = '<tr id="loading-row"><td colspan="8" class="text-center py-4 text-gray-500">Loading records...</td></tr>';
+                invoiceTableBody.innerHTML = '<tr id="loading-row"><td colspan="9" class="text-center py-4 text-gray-500">Loading records...</td></tr>';
                 
                 const allInvoices = [];
                 snapshot.forEach((doc) => {
@@ -360,8 +414,8 @@
                 });
                 // --- END SORTING LOGIC ---
 
-                if (allInvoices.length === 0) {
-                     invoiceTableBody.innerHTML = '<tr id="no-records-row"><td colspan="8" class="text-center py-4 text-gray-500">No records found for this period.</td></tr>';
+             if (allInvoices.length === 0) {
+                 invoiceTableBody.innerHTML = '<tr id="no-records-row"><td colspan="9" class="text-center py-4 text-gray-500">No records found for this period.</td></tr>';
                 }
 
                 allInvoices.forEach((invoice) => {
@@ -417,7 +471,7 @@
 
             }, (error) => {
                 console.error("Firestore onSnapshot error:", error);
-                document.getElementById('invoiceTableBody').innerHTML = '<tr id="error-row"><td colspan="8" class="text-center py-4 text-red-500">Error loading records. See console.</td></tr>';
+                document.getElementById('invoiceTableBody').innerHTML = '<tr id="error-row"><td colspan="9" class="text-center py-4 text-red-500">Error loading records. See console.</td></tr>';
             });
             // Cleanup function returned for potential future use, though not strictly needed here
             return unsubscribe; 
